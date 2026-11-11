@@ -28,7 +28,7 @@ jobs:
           .venv/bin/python -m pip install --upgrade pip
           .venv/bin/python -m pip install -r requirements.txt -r requirements-dev.txt
 
-      - name: QA 质量门禁（52 条用例 + 覆盖率 + 安全）
+      - name: QA 质量门禁（全量用例 + 覆盖率 + 安全）
         env:
           QT_QPA_PLATFORM: offscreen
         run: .venv/bin/python tests/run_qa.py
