@@ -1,0 +1,87 @@
+name: 构建 macOS 应用
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 准备 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 创建虚拟环境并安装依赖
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: QA 质量门禁（52 条用例 + 覆盖率 + 安全）
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: .venv/bin/python tests/run_qa.py
+
+      - name: 打包 .app
+        run: ./build.sh
+
+      - name: 冻结进程语音合成自检
+        env:
+          QT_QPA_PLATFORM: offscreen
+          DOCREADER_SELFTEST: '1'
+        run: |
+          rm -f /tmp/docreader_selftest.json
+          "dist/文档朗读器.app/Contents/MacOS/文档朗读器"
+          .venv/bin/python - <<'PY'
+          import json
+          from pathlib import Path
+          data = json.loads(Path("/tmp/docreader_selftest.json").read_text(encoding="utf-8"))
+          print("打包后自检:", data)
+          assert data["ok"] is True and data["duration"] > 0, "打包后语音自检失败"
+          PY
+
+      - name: 压缩产物
+        run: |
+          cd dist
+          zip -q -r -y "文档朗读器.app.zip" "文档朗读器.app"
+          ls -lh "文档朗读器.app.zip"
+
+      - name: 上传 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 文档朗读器-macOS-${{ github.ref_name }}
+          path: dist/文档朗读器.app.zip
+          retention-days: 90
+
+      - name: 上传 QA 报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: QA-报告-${{ github.ref_name }}
+          path: |
+            tests/docs/QA-REPORT-*.md
+            tests/docs/templates/TEST-EXECUTION-TRACKING.csv
+
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: 文档朗读器 ${{ github.ref_name }}
+          files: dist/文档朗读器.app.zip
+          generate_release_notes: true
+          body: |
+            macOS 离线文档朗读器。支持 txt / Markdown / PDF / Word，边看边听、句级高亮、播放列表与断点续读。
+
+            本产物由 GitHub Actions 在 `macos-latest` 上自动构建：QA 质量门禁通过后才打包，并完成冻结进程内的系统语音合成自检。
+
+            首次打开如被 Gatekeeper 拦截，请右键 .app → 打开（已做 ad-hoc 签名，未做 Apple 公证）。

@@ -1,0 +1,4 @@
+# 开发与测试依赖（GitHub Actions 的 QA 门禁步骤会一并安装）
+pytest>=8.0,<10
+pytest-cov>=6.0,<8
+pyyaml>=6.0,<7
