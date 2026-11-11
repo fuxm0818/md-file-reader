@@ -38,7 +38,10 @@ TRACKING_CSV = CATALOG.TRACKING_CSV
 BUG_CSV = ROOT / "tests/docs/BUG-TRACKING.csv"
 SEC_DOC = ROOT / "tests/docs/03-SEC-TEST-CASES.md"
 COVERAGE_JSON = ROOT / ".qa-workspace/coverage.json"
-VERSION = os.environ.get("QA_VERSION", "v1.1.0")
+# 版本号跟应用同源，避免报告写着 v1.4.0、.app 里却是别的值。
+from src.version import VERSION_TAG  # noqa: E402
+
+VERSION = os.environ.get("QA_VERSION", VERSION_TAG)
 
 
 def run_pytest() -> tuple[int, str]:

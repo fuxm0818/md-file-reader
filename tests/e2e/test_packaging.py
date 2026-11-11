@@ -77,9 +77,23 @@ def test_selftest_falls_back_without_chinese_voice(monkeypatch):
     from src.core.speech import Voice
     monkeypatch.setattr(sp, "list_voices", lambda: [Voice("Alex", "en_US")])
     monkeypatch.setattr(sp, "choose_voice", lambda voices, preferred="": None)
+    # 自检会打开这个文件验证打磨后级，所以桩必须写出真实波形，
+    # 不能只返回一个不存在的路径。
+    import wave
+
+    import numpy as np
+
+    QA_CACHE.mkdir(parents=True, exist_ok=True)
+    fallback_wav = QA_CACHE / "fallback.wav"
+    tone = (0.85 * np.sin(2 * np.pi * 220 * np.arange(24000) / 24000)).astype(np.float32)
+    with wave.open(str(fallback_wav), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(24000)
+        handle.writeframes((tone * 32767).astype(np.int16).tobytes())
     monkeypatch.setattr(
         sp.SpeechEngine, "synthesize",
-        lambda self, text: (QA_CACHE / "fallback.aiff", 1.2, ""),
+        lambda self, text, tail_pause=0.0: (fallback_wav, 1.2, ""),
     )
     result_file = Path("/tmp/docreader_selftest.json")
     if result_file.exists():
@@ -128,3 +142,55 @@ def test_gitignore_protects_repo():
         assert pattern in ignore, f"缺少忽略规则: {pattern}"
     for kept in ("src/", ".github/", "samples/", "tests/docs/"):
         assert not re.search(rf"^\s*{re.escape(kept)}\s*$", ignore, re.M)
+
+
+@pytest.mark.case("TC-PKG-007")
+def test_app_icon_is_shipped():
+    """没有图标的 .app 在 Dock 里是一个空白文档，用户认不出来。"""
+    from src.main import app_icon_path
+
+    icns = ROOT / "assets" / "AppIcon.icns"
+    png = ROOT / "assets" / "AppIcon.png"
+    assert icns.exists(), "缺少 assets/AppIcon.icns"
+    assert png.exists(), "缺少 assets/AppIcon.png"
+    assert icns.stat().st_size > 20_000, "icns 太小，多半没有写入各尺寸"
+    assert png.stat().st_size > 5_000
+
+    script = (ROOT / "build.sh").read_text(encoding="utf-8")
+    assert "--icon" in script and "AppIcon.icns" in script, "打包脚本没有指定图标"
+
+    # 运行时窗口图标走 app_icon_path()，源码模式下应指向仓库里的 png
+    path = app_icon_path()
+    assert path is not None and path.suffix == ".png"
+
+
+@pytest.mark.case("TC-PKG-008")
+def test_version_is_single_source_and_shipped():
+    """版本号只维护一份，并真的写进 .app —— 否则用户查不到自己装的是哪一版。"""
+    from src.version import __version__
+
+    assert re.fullmatch(r"\d+\.\d+\.\d+", __version__), __version__
+
+    script = (ROOT / "build.sh").read_text(encoding="utf-8")
+    assert "CFBundleShortVersionString" in script, "打包脚本没有写入版本号"
+    assert "CFBundleVersion" in script
+    # 改 Info.plist 会让临时签名失效，写入必须排在签名之前
+    assert script.index("CFBundleShortVersionString") < script.index("codesign")
+
+    main_src = (ROOT / "src/main.py").read_text(encoding="utf-8")
+    assert "setApplicationVersion" in main_src, "Qt 应用没设置版本号"
+
+    window_src = (ROOT / "src/ui/main_window.py").read_text(encoding="utf-8")
+    assert "__version__" in window_src, "「关于」面板没有显示版本"
+
+    plist = ROOT / "dist/文档朗读器.app/Contents/Info.plist"
+    if plist.exists():
+        raw = plist.read_text(encoding="utf-8")
+        m = re.search(
+            r"<key>CFBundleShortVersionString</key>\s*<string>([^<]*)</string>", raw
+        )
+        assert m, "产物缺少 CFBundleShortVersionString"
+        assert m.group(1) == __version__, (
+            f"产物版本 {m.group(1)} 与源码 {__version__} 不一致"
+        )
+        assert "<key>CFBundleVersion</key>" in raw, "产物缺少 CFBundleVersion"

@@ -7,9 +7,12 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QFileDialog,
+    QFrame,
+    QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
+    QPushButton,
     QSplitter,
     QStatusBar,
     QVBoxLayout,
@@ -20,6 +23,9 @@ from ..controller import ReaderController
 from ..core.parsers import SUPPORTED_EXTS
 from ..core.speech import cleaned_env
 from ..core.store import Store
+from ..core.voices import describe
+from ..version import __version__
+from . import theme
 from .controls import ControlBar
 from .playlist_view import PlaylistView, collect_paths
 from .reader_view import ReaderView
@@ -30,47 +36,122 @@ FILE_FILTER = (
     "所有文件 (*)"
 )
 
+SIDEBAR_WIDTH = 296
+SIDEBAR_MIN = 200
+SIDEBAR_MAX = 620
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.p = theme.palette()
         self.store = Store()
         self.controller = ReaderController(self.store)
         c = self.controller
 
         self.setWindowTitle("文档朗读器")
-        self.resize(1120, 740)
+        self.resize(1180, 780)
+        self.setMinimumSize(900, 600)
         self.setAcceptDrops(True)
+        self.setStyleSheet(theme.stylesheet(self.p))
 
         self.reader = ReaderView()
         self.playlist = PlaylistView()
         self.controls = ControlBar()
         self.settings_dialog = SettingsDialog(c, self)
 
+        # ------------------------------------------------------- right column
+        self.doc_title = QLabel("未选择文档")
+        self.doc_title.setObjectName("Title")
+        self.doc_title.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.doc_meta = QLabel("把文档拖到左边，或点“添加文档”")
+        self.doc_meta.setObjectName("Hint")
+
+        title_text = QVBoxLayout()
+        title_text.setSpacing(1)
+        title_text.addWidget(self.doc_title)
+        title_text.addWidget(self.doc_meta)
+
+        self.add_button = QPushButton("打开文档")
+        theme.set_icon(self.add_button, "folder", self.p.secondary, 16)
+        self.add_button.clicked.connect(lambda _=False: self.add_files())
+
+        self.settings_button = QPushButton()
+        self.settings_button.setObjectName("IconButton")
+        theme.set_icon(self.settings_button, "settings", self.p.secondary, 18)
+        self.settings_button.setToolTip("偏好设置")
+        self.settings_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.settings_button.clicked.connect(lambda _=False: self.open_settings())
+
+        toolbar = QWidget()
+        toolbar.setObjectName("Toolbar")
+        toolbar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        bar = QHBoxLayout(toolbar)
+        bar.setContentsMargins(20, 14, 16, 12)
+        bar.setSpacing(10)
+        bar.addLayout(title_text, 1)
+        bar.addWidget(self.add_button)
+        bar.addWidget(self.settings_button)
+
+        card = QFrame()
+        card.setObjectName("ReaderCard")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(1, 1, 1, 1)
+        card_layout.addWidget(self.reader)
+
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(0)
-        right_layout.addWidget(self.reader, 1)
+        right_layout.addWidget(toolbar)
+        inner = QVBoxLayout()
+        inner.setContentsMargins(16, 0, 16, 12)
+        inner.addWidget(card)
+        right_layout.addLayout(inner, 1)
         right_layout.addWidget(self.controls)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(self.playlist)
-        splitter.addWidget(right)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([300, 820])
-        self.setCentralWidget(splitter)
+        self.playlist.setMinimumWidth(SIDEBAR_MIN)
+        self.playlist.setMaximumWidth(SIDEBAR_MAX)
+
+        # 左右两栏用 splitter 而不是固定 296px：目录名长的时候有人想把左边
+        # 拉宽看全，读正文的时候又想把它收窄。handle 只做拖拽热区，视觉上
+        # 的线由 #Sidebar 自带的右边框提供，所以这里让 handle 与窗口同色。
+        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.splitter.setObjectName("MainSplitter")
+        self.splitter.setChildrenCollapsible(False)
+        self.splitter.setHandleWidth(7)
+        self.splitter.addWidget(self.playlist)
+        self.splitter.addWidget(right)
+        self.splitter.setStretchFactor(0, 0)
+        self.splitter.setStretchFactor(1, 1)
+        width = int(c.settings.get("sidebar_width", SIDEBAR_WIDTH) or SIDEBAR_WIDTH)
+        width = max(SIDEBAR_MIN, min(SIDEBAR_MAX, width))
+        self.splitter.setSizes([width, max(1, self.width() - width)])
+        self.setCentralWidget(self.splitter)
+
+        # 拖动过程中每移动一像素都会发信号，攒到停手再写盘一次。
+        self._split_timer = QTimer(self)
+        self._split_timer.setSingleShot(True)
+        self._split_timer.setInterval(400)
+        self._split_timer.timeout.connect(self._save_sidebar_width)
+        self.splitter.splitterMoved.connect(lambda *_: self._split_timer.start())
 
         self.status_bar = QStatusBar()
+        self.status_bar.setSizeGripEnabled(False)
         self.setStatusBar(self.status_bar)
-        self.status_label = QLabel("就绪")
-        self.status_bar.addPermanentWidget(self.status_label)
+        self.voice_tag = QLabel()
+        self.voice_tag.setObjectName("Faint")
+        self.status_bar.addPermanentWidget(self.voice_tag)
+        offline = QLabel("本地合成 · 不联网 · 不上传文档")
+        offline.setObjectName("Faint")
+        self.status_bar.addPermanentWidget(offline)
 
         self._build_menu()
         self._connect()
         self.controls.sync_settings(c.settings)
         self.reader.set_auto_scroll(bool(c.settings.get("auto_scroll", True)))
         self._refresh_list()
+        self._refresh_voice_tag()
 
         if not c.has_chinese_voice():
             QMessageBox.warning(
@@ -79,6 +160,8 @@ class MainWindow(QMainWindow):
                 "本机没有可用的中文语音，朗读功能不可用。\n\n"
                 "请到「系统设置 → 辅助功能 → 朗读内容 → 管理声音」下载任一中文音色后重启本程序。",
             )
+        elif c.startup_message:
+            self._message(c.startup_message)
         QTimer.singleShot(0, c.restore_session)
 
     # ------------------------------------------------------------------ ui
@@ -122,7 +205,7 @@ class MainWindow(QMainWindow):
 
         tools = menu.addMenu("工具")
         tools.addAction("偏好设置…").triggered.connect(
-            lambda _=False: self.settings_dialog.exec()
+            lambda _=False: self.open_settings()
         )
         tools.addAction("清理音频缓存").triggered.connect(
             lambda _=False: self._clear_cache()
@@ -134,17 +217,12 @@ class MainWindow(QMainWindow):
         c = self.controller
         c.documentLoaded.connect(self.reader.set_document)
         c.sentenceChanged.connect(self.reader.highlight)
-        c.positionChanged.connect(self.controls.update_position)
+        c.positionChanged.connect(self._on_position)
         c.stateChanged.connect(self.controls.set_playing)
         c.itemChanged.connect(self._on_item_changed)
         c.listChanged.connect(self._refresh_list)
         c.message.connect(self._message)
-        c.settingsChanged.connect(
-            lambda: (
-                self.controls.sync_settings(c.settings),
-                self.settings_dialog.refresh_from_settings(),
-            )
-        )
+        c.settingsChanged.connect(self._on_settings_changed)
 
         self.reader.readFromHere.connect(c.seek_sentence)
 
@@ -186,6 +264,7 @@ class MainWindow(QMainWindow):
         d.clearCacheRequested.connect(self._clear_cache)
         d.previewRequested.connect(c.preview_voice)
         d.oralizeChanged.connect(c.set_oralize)
+        d.symbolChanged.connect(c.set_symbol_cleaning)
         d.prosodyChanged.connect(c.set_prosody_level)
 
         QShortcut(QKeySequence("Space"), self, c.toggle_play)
@@ -194,14 +273,44 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+Up"), self, c.prev_item)
         QShortcut(QKeySequence("Ctrl+Down"), self, c.next_item)
 
+    # ------------------------------------------------------------- dialogs
+    def open_settings(self) -> None:
+        self.settings_dialog.refresh_from_settings()
+        self.settings_dialog.exec()
+
+    def _refresh_voice_tag(self) -> None:
+        voice = self.controller.voice
+        self.voice_tag.setText(
+            f"音色：{describe(voice)}" if voice else "没有可用的中文音色"
+        )
+        if voice:
+            self.voice_tag.setToolTip(f"当前音色：{voice.identifier}")
+
+    def _on_settings_changed(self) -> None:
+        c = self.controller
+        self.controls.sync_settings(c.settings)
+        self.settings_dialog.refresh_from_settings()
+        self._refresh_voice_tag()
+
+    def _on_position(self, current, total, fraction, index, count) -> None:
+        self.controls.update_position(current, total, fraction, index, count)
+        if count:
+            from .controls import fmt_time
+
+            self.doc_meta.setText(f"共 {count} 句 · 约 {fmt_time(total)}")
+
     def _message(self, text: str) -> None:
         self.status_bar.showMessage(text, 8000)
-        self.status_label.setText(text)
 
     def _on_item_changed(self, index: int) -> None:
         items = self.store.items
         if 0 <= index < len(items):
-            self.setWindowTitle(f"{Path(items[index]['path']).name} — 文档朗读器")
+            name = Path(items[index]["path"]).name
+            self.setWindowTitle(f"{name} — 文档朗读器")
+            self.doc_title.setText(name)
+        elif not items:
+            self.doc_title.setText("未选择文档")
+            self.doc_meta.setText("把文档拖到左边，或点“添加文档”")
 
     def _refresh_list(self) -> None:
         self.playlist.refresh(
@@ -222,6 +331,16 @@ class MainWindow(QMainWindow):
             c.current_item = -1
         self._refresh_list()
 
+    def _save_sidebar_width(self) -> None:
+        sizes = self.splitter.sizes()
+        if not sizes:
+            return
+        width = max(SIDEBAR_MIN, min(SIDEBAR_MAX, sizes[0]))
+        if self.store.settings.get("sidebar_width") == width:
+            return
+        self.store.settings["sidebar_width"] = width
+        self.store.save()
+
     # ------------------------------------------------------------ add files
     def add_files(self) -> None:
         files, _ = QFileDialog.getOpenFileNames(
@@ -236,9 +355,7 @@ class MainWindow(QMainWindow):
             self._add_paths(paths, None)
 
     def add_folder(self) -> None:
-        folder = QFileDialog.getExistingDirectory(
-            self, "选择文件夹", str(Path.home())
-        )
+        folder = QFileDialog.getExistingDirectory(self, "选择文件夹", str(Path.home()))
         if folder:
             self._add_paths(collect_paths([folder]), None)
 
@@ -352,11 +469,25 @@ class MainWindow(QMainWindow):
         QMessageBox.about(
             self,
             "关于文档朗读器",
+            f"文档朗读器 {__version__}\n\n"
             "本地离线文档朗读器\n\n"
             "支持 txt / Markdown / PDF / Word，逐句合成、句级高亮、"
             "双坐标进度条、播放列表与断点续读。\n"
             "语音由 macOS 系统合成，不联网、不上传文档内容。",
         )
+
+    # --------------------------------------------------------------- theme
+    def apply_palette(self, p) -> None:
+        """系统切换深浅色时由 ``theme.refresh`` 回调。
+
+        主窗口自己带着一份样式表（比应用级更具体，会覆盖它），所以这里要
+        重设一次；子部件由 theme 逐个遍历处理，不在这里重复下发。
+        """
+        self.p = p
+        self.setStyleSheet(theme.stylesheet(p))
+        theme.set_icon(self.add_button, "folder", p.secondary, 16)
+        theme.set_icon(self.settings_button, "settings", p.secondary, 18)
+        self.update()
 
     # --------------------------------------------------------------- events
     def dragEnterEvent(self, event):
@@ -370,5 +501,9 @@ class MainWindow(QMainWindow):
             event.acceptProposedAction()
 
     def closeEvent(self, event):
+        # 拖动后立刻关窗口时，防抖定时器还没触发，这里补一次。
+        if self._split_timer.isActive():
+            self._split_timer.stop()
+            self._save_sidebar_width()
         self.controller.shutdown()
         super().closeEvent(event)

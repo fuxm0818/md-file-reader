@@ -247,3 +247,129 @@ def test_stop_and_shutdown_leave_no_threads(controller):
     c.shutdown()
     assert not c.timer.isActive()
     assert c.pool.activeThreadCount() == 0
+
+
+@pytest.mark.case("TC-GUI-015")
+def test_folder_scan_uses_natural_sort(tmp_path):
+    """文件夹里 1、11、2、21 的顺序是字符串比较的产物，不是用户想要的顺序。"""
+    from pathlib import Path
+
+    from src.ui.playlist_view import collect_paths
+
+    names = ["1.md", "11.md", "2.md", "21.md", "3.md", "第1章.md", "第10章.md", "第2章.md"]
+    for name in names:
+        (tmp_path / name).write_text("正文", encoding="utf-8")
+
+    got = [Path(p).name for p in collect_paths([str(tmp_path)])]
+    assert got == [
+        "1.md",
+        "2.md",
+        "3.md",
+        "11.md",
+        "21.md",
+        "第1章.md",
+        "第2章.md",
+        "第10章.md",
+    ], f"自然排序结果不符：{got}"
+
+
+@pytest.mark.case("TC-GUI-016")
+def test_sidebar_width_is_remembered(fresh_store, make_controller, monkeypatch, qapp):
+    """分栏宽度要能拖、能存、重开还在，否则拖完下次又回到 296。"""
+    from PySide6.QtWidgets import QMessageBox, QSplitter
+    from src.controller import ReaderController
+    from src.ui.main_window import SIDEBAR_MAX, SIDEBAR_MIN, MainWindow
+
+    monkeypatch.setattr(ReaderController, "has_chinese_voice", lambda self: True)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: None)
+
+    first = MainWindow()
+    try:
+        assert isinstance(first.splitter, QSplitter)
+        assert first.splitter.count() == 2
+        assert first.splitter.widget(0) is first.playlist
+        assert first.splitter.handleWidth() >= 4, "拖拽热区太窄，鼠标抓不住"
+        assert first.playlist.minimumWidth() == SIDEBAR_MIN
+        assert first.playlist.maximumWidth() == SIDEBAR_MAX
+    finally:
+        first.controller.shutdown()
+        first.close()
+
+    # 记一个宽度，重开应该原样恢复。
+    fresh_store.settings["sidebar_width"] = 430
+    fresh_store.save()
+    second = MainWindow()
+    try:
+        # 未 show 的窗口不会真正布局，splitter 会停在最小宽度上，
+        # 这时读 sizes() 得到的是 200 而不是要验证的恢复值。
+        second.resize(1180, 780)
+        second.show()
+        wait_ms(120)
+        assert second.splitter.sizes()[0] == 430, (
+            f"宽度未恢复：{second.splitter.sizes()}"
+        )
+    finally:
+        second.controller.shutdown()
+        second.close()
+
+
+@pytest.mark.case("TC-GUI-017")
+def test_controls_fold_on_narrow_width(monkeypatch, qapp):
+    """窄窗口下语速和音量要收起，否则它们撑住右栏最小宽度，左栏拉不宽。"""
+    from PySide6.QtCore import QSize
+    from PySide6.QtGui import QResizeEvent
+
+    from src.ui.controls import COMPACT_ENTER, COMPACT_LEAVE, ControlBar
+
+    def resize(bar, width):
+        """不 show 也要走一遍 resizeEvent，才能验证折叠判定。"""
+        old = QSize(bar.width(), bar.height())
+        bar.resize(width, 110)
+        bar.resizeEvent(QResizeEvent(QSize(width, 110), old))
+
+    bar = ControlBar()
+    resize(bar, COMPACT_LEAVE + 100)
+    assert not bar.rate_combo.isHidden(), "宽窗口应显示语速"
+
+    resize(bar, COMPACT_ENTER - 40)
+    assert bar.rate_combo.isHidden() and bar.volume.isHidden(), "窄窗口应收起语速与音量"
+    assert not bar.slider.isHidden(), "进度条不能收起"
+
+
+@pytest.mark.case("TC-GUI-018")
+def test_theme_follows_system(fresh_store, make_controller, monkeypatch, qapp):
+    """README 承诺「深浅色跟随系统」，就不能只是启动时算一次。"""
+    from PySide6.QtWidgets import QMessageBox
+    from src.controller import ReaderController
+    from src.ui import theme
+    from src.ui.main_window import MainWindow
+    from src.ui.widgets import CheckBox
+
+    monkeypatch.setattr(ReaderController, "has_chinese_voice", lambda self: True)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: None)
+
+    window = MainWindow()
+    try:
+        theme.apply(qapp)
+        assert window.p.dark is theme.is_dark()
+
+        # 模拟系统切到深色。offscreen 平台不会自己发 colorSchemeChanged，
+        # 所以直接换掉判定函数再走一次统一刷新入口。
+        monkeypatch.setattr(theme, "is_dark", lambda *a, **k: True)
+        theme.refresh(qapp)
+        assert window.p.dark is True
+        assert theme.DARK.window in window.styleSheet()
+        assert window.playlist.p.dark is True, "左栏没有跟着换色"
+        assert window.controls.p.dark is True, "控制栏没有跟着换色"
+        assert window.settings_dialog.p.dark is True, "设置面板没有跟着换色"
+        boxes = window.findChildren(CheckBox)
+        assert boxes and all(box.p.dark for box in boxes), "自绘复选框仍是旧配色"
+
+        monkeypatch.setattr(theme, "is_dark", lambda *a, **k: False)
+        theme.refresh(qapp)
+        assert window.p.dark is False
+        assert theme.LIGHT.window in window.styleSheet()
+        assert window.playlist.p.dark is False
+    finally:
+        window.controller.shutdown()
+        window.close()

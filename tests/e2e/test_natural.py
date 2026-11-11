@@ -141,15 +141,18 @@ def test_pause_budget_matches_rendered_pauses_and_timeline():
 
 
 @pytest.mark.case("TC-NAT-008")
-def test_default_voice_prefers_modern_and_keeps_legacy_compatibility(voice):
-    from src.core.speech import Voice, choose_voice, list_voices
+def test_default_voice_is_tingting_with_sane_fallbacks(voice):
+    from src.core.speech import DEFAULT_VOICE, Voice, choose_voice, list_voices
 
+    # v1.4 的产品决定：固定用婷婷，不再自动挑「更现代」的音色。
     voices = list_voices()
-    modern = [v for v in voices if v.is_chinese and v.is_modern]
     chosen = choose_voice(voices)
     assert chosen is not None and chosen.is_chinese
-    if modern:
-        assert chosen.is_modern and chosen.locale == "zh_CN"
+    has_default = any(v.identifier.startswith(DEFAULT_VOICE) for v in voices)
+    if has_default:
+        assert chosen.identifier.startswith(DEFAULT_VOICE), (
+            f"默认音色应为 {DEFAULT_VOICE}，实际 {chosen.identifier}"
+        )
     fake = [
         Voice("Alex", "en_US"), Voice("Sinji", "zh_HK"),
         Voice("Tingting", "zh_CN"), Voice("Meijia", "zh_TW"),
@@ -168,6 +171,14 @@ def test_empty_audio_is_rejected_and_voice_falls_back(voice, monkeypatch, sample
     import src.core.speech as sp
     from src.core.speech import MIN_AUDIO_DURATION, SpeechEngine, Voice
 
+    # 「注册了但没下载」是系统语音才有的状态：模型是随包分发的，不存在半个
+    # 文件。所以这条用例显式走 say 路径，不依赖默认音色是哪一个。
+    system_voice = next(
+        (v for v in sp.list_system_voices() if v.is_chinese), None
+    )
+    if system_voice is None:
+        pytest.skip("本机没有中文系统音色，无法验证空音频检测")
+
     def fake_run(args, timeout=120, input_text=None):
         target = Path(args[args.index("-o") + 1])
         target.write_bytes(b"RIFF" + b"0" * 200)
@@ -178,15 +189,17 @@ def test_empty_audio_is_rejected_and_voice_falls_back(voice, monkeypatch, sample
     with monkeypatch.context() as probe:
         probe.setattr(sp, "_run", fake_run)
         probe.setattr(sp, "probe_duration", lambda path: 0.01)
-        probe.setattr(SpeechEngine, "cached", lambda self, text: (None, 0.0))
-        engine = SpeechEngine(voice, 200)
+        probe.setattr(SpeechEngine, "cached", lambda self, text, tail_pause=0.0: (None, 0.0))
+        engine = SpeechEngine(system_voice, 200)
         path, duration, error = engine.synthesize("空音频探测文本")
         assert path is None and duration == 0.0
         assert error.startswith("EMPTY_AUDIO:")
         assert MIN_AUDIO_DURATION >= 0.016
 
     c = make_controller(fresh_store, SAMPLE_PATHS)
-    original = c.voice.identifier
+    original = "Bad"
+    c.voice = Voice(original, "zh_CN")
+    c.engine = SpeechEngine(c.voice, 200)
     c.voices = [Voice(original, "zh_CN"), Voice("Backup", "zh_CN")]
     calls = []
 
@@ -217,7 +230,9 @@ def test_cache_key_isolates_rewrite_prosody_voice_and_rate(voice):
     ]
     e = SpeechEngine(voice, 200)
     keys = [e.key(t) for t in variants]
-    keys.append(SpeechEngine(Voice("Tingting", "zh_CN"), 200).key(variants[1]))
+    # 换一个与当前默认不同的音色，确认音色进入缓存键
+    other = "Meijia" if not voice.identifier.startswith("Meijia") else "Tingting"
+    keys.append(SpeechEngine(Voice(other, "zh_CN"), 200).key(variants[1]))
     keys.append(SpeechEngine(voice, 240).key(variants[1]))
     assert len(set(keys)) == len(keys)
     assert e.key(variants[1]) == keys[1]

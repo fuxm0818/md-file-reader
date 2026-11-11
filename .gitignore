@@ -31,3 +31,7 @@ htmlcov/
 # 系统与音频缓存
 .DS_Store
 *.aiff
+
+# 图标生成的中间产物（AppIcon.icns / .png 要入库）
+assets/AppIcon.iconset/
+

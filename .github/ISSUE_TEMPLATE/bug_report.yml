@@ -1,0 +1,77 @@
+name: 问题反馈
+description: 朗读、播放、解析之类的功能异常
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        贴日志前请先看一眼有没有敏感内容（文档全文、路径里的用户名等）。
+        语音相关的问题，附上自检输出通常能直接定位。
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 发生了什么
+      description: 实际看到的现象，越具体越好
+      placeholder: |
+        点击「播放」后，第一句读完就停了，进度条不动，控制台没有任何输出。
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望发生什么
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 打开示例文档
+        2. 把语速调到 260
+        3. 点播放
+    validations:
+      required: true
+
+  - type: dropdown
+    id: format
+    attributes:
+      label: 文档格式
+      multiple: true
+      options:
+        - Markdown
+        - 纯文本
+        - PDF
+        - Word
+        - 其他
+
+  - type: input
+    id: macos
+    attributes:
+      label: macOS 版本
+      description: 运行 `sw_vers -productVersion` 的输出
+      placeholder: "15.2"
+    validations:
+      required: true
+
+  - type: textarea
+    id: selftest
+    attributes:
+      label: 自检输出
+      description: |
+        在终端运行下面这条命令，把输出的 JSON 贴进来：
+        ```
+        DOCREADER_SELFTEST=1 /Applications/文档朗读器.app/Contents/MacOS/文档朗读器
+        ```
+      render: json
+
+  - type: input
+    id: version
+    attributes:
+      label: 应用版本
+      description: 看 Release 名称，或菜单「关于」里的版本号
+    validations:
+      required: true

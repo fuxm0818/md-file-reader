@@ -27,6 +27,10 @@ def test_command_injection_is_impossible(monkeypatch, voice, tmp_path):
     cache = tmp_path / "inject_cache"
     cache.mkdir()
     monkeypatch.setattr(sp, "CACHE_DIR", cache)
+    # 必须在下面对 _run 打桩之前取音色，否则 list_system_voices 拿到的是假输出。
+    system_voice = next(
+        (v for v in sp.list_system_voices() if v.is_chinese), None
+    )
     captured = []
 
     def fake_run(args, input_text=None, **kwargs):
@@ -37,7 +41,11 @@ def test_command_injection_is_impossible(monkeypatch, voice, tmp_path):
         return subprocess.CompletedProcess(args, 0, "", "")
 
     monkeypatch.setattr(sp, "_run", fake_run)
-    engine = sp.SpeechEngine(voice, 200)
+    # 命令注入的风险面是「把文本拼进 argv / 走 shell」。神经语音完全在本进程
+    # 内推理、不调用任何外部命令，所以这里针对 say 路径做验证。
+    if system_voice is None:
+        pytest.skip("本机没有中文系统音色，无法验证 argv 注入面")
+    engine = sp.SpeechEngine(system_voice, 200)
     payload = '"; touch /tmp/pwned_QA; rm -rf $HOME; # `whoami` $(id)\n'
     path, duration, error = engine.synthesize(payload)
     assert path is not None and duration == 1.25 and not error

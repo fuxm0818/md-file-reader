@@ -145,9 +145,9 @@ def test_calibration_formula(monkeypatch, voice):
     from src.core.speech import CALIBRATION_TEXT, DEFAULT_SEC_PER_CHAR, SpeechEngine
     engine = SpeechEngine(voice, 200)
     chars = len(re.sub(r"[\s，。！？、；：]", "", CALIBRATION_TEXT))
-    monkeypatch.setattr(SpeechEngine, "synthesize", lambda self, text: (None, 20.0, ""))
+    monkeypatch.setattr(SpeechEngine, "synthesize", lambda self, text, tail_pause=0.0: (None, 20.0, ""))
     assert engine.calibrate() == round(20.0 / chars, 4)
-    monkeypatch.setattr(SpeechEngine, "synthesize", lambda self, text: (None, 0.0, "失败"))
+    monkeypatch.setattr(SpeechEngine, "synthesize", lambda self, text, tail_pause=0.0: (None, 0.0, "失败"))
     assert engine.calibrate() == DEFAULT_SEC_PER_CHAR
 
 
@@ -334,3 +334,43 @@ def test_cache_cleanup(monkeypatch, tmp_path, voice):
     assert engine.clear_cache() == 3
     assert (cache / "subdir").is_dir()
     assert engine.clear_cache() == 0
+
+
+@pytest.mark.case("TC-CORE-021")
+def test_cache_limit_evicts_oldest(monkeypatch, tmp_path, voice):
+    """设置面板许诺「超过上限自动清理最旧的」，就得真的按 mtime 淘汰。"""
+    import os
+
+    import src.core.speech as sp
+
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    files = []
+    for i in range(20):
+        path = cache / f"{i:02d}.wav"
+        path.write_bytes(b"x" * 120_000)
+        # mtime 依次递增，00 最旧、19 最新
+        stamp = 1_700_000_000 + i
+        os.utime(path, (stamp, stamp))
+        files.append(path)
+
+    monkeypatch.setattr(sp, "CACHE_DIR", cache)
+    limit = 1  # MB
+    engine = sp.SpeechEngine(voice, 200, cache_limit_mb=limit)
+
+    before = sum(p.stat().st_size for p in files)
+    assert before > limit * 1024 * 1024
+
+    removed = engine.enforce_cache_limit()
+    assert removed > 0
+    left = [p for p in cache.iterdir() if p.is_file()]
+    after = sum(p.stat().st_size for p in left)
+    assert after <= limit * 1024 * 1024 * 0.85 + 1, f"没删够，还剩 {after} 字节"
+    assert not files[0].exists(), "最旧的文件应当先被淘汰"
+    assert files[-1].exists(), "最新的文件不能被删"
+
+    # 已经低于上限，再调一次不该继续删
+    assert engine.enforce_cache_limit() == 0
+    # 0 表示不限制
+    unlimited = sp.SpeechEngine(voice, 200, cache_limit_mb=0)
+    assert unlimited.enforce_cache_limit() == 0

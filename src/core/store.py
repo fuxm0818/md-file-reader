@@ -18,9 +18,11 @@ DEFAULT_SETTINGS = {
     "skip_code": True,
     "auto_resume": True,
     "oralize": True,           # 文档 → 口播稿（技术类文档自动关闭）
+    "clean_symbols": True,     # 跳过斜杠、破折号这类会被念出来的符号
     "prosody_level": 2,        # 0 关闭 / 1 轻 / 2 标准 / 3 强
     "calibrations": {},
     "cache_limit_mb": 500,
+    "sidebar_width": 296,      # 左栏宽度，拖动分割线后记住
 }
 
 MODES = {

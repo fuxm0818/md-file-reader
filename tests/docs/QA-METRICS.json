@@ -1,13 +1,13 @@
 {
-  "version": "v1.1.0",
-  "generated_at": "2026-11-11 15:24:10",
+  "version": "v1.4.0",
+  "generated_at": "2026-11-11 23:00:27",
   "pytest_rc": 0,
-  "total": 64,
-  "executed": 64,
-  "passed": 64,
+  "total": 82,
+  "executed": 82,
+  "passed": 82,
   "failed": 0,
   "pass_rate": 100.0,
-  "coverage": 87.2,
+  "coverage": 85.7,
   "security_rate": 100.0,
   "security_detail": "安全用例 12/12 通过，OWASP 类目结论 10/10",
   "bugs": [
@@ -22,13 +22,31 @@
       "severity": "P2",
       "status": "Verified",
       "title": "PDF 兼容表意文字未归一化，正文与朗读出现异体字"
+    },
+    {
+      "id": "BUG-003",
+      "severity": "P2",
+      "status": "Verified",
+      "title": "打包产物版本号恒为 0.0.0，界面不显示版本"
+    },
+    {
+      "id": "BUG-004",
+      "severity": "P1",
+      "status": "Verified",
+      "title": "系统切换深浅色后界面不跟随，深色下句级高亮撞色"
+    },
+    {
+      "id": "BUG-005",
+      "severity": "P1",
+      "status": "Verified",
+      "title": "音频缓存「上限 500 MB」未生效，只增不减"
     }
   ],
   "gates": [
     {
       "name": "G1 测试执行率 100%",
       "ok": true,
-      "value": "64/64"
+      "value": "82/82"
     },
     {
       "name": "G2 通过率 ≥80%",
@@ -43,12 +61,12 @@
     {
       "name": "G4 P1 缺陷 ≤5",
       "ok": true,
-      "value": "1 个"
+      "value": "3 个"
     },
     {
       "name": "G5 代码覆盖率 ≥80%",
       "ok": true,
-      "value": "87.2%"
+      "value": "85.7%"
     },
     {
       "name": "G6 安全覆盖 ≥90%",

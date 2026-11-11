@@ -12,18 +12,24 @@ from .core.oralizer import oralize, oralize_enabled
 from .core.parsers import parse
 from .core.prosody import LEVEL_LABELS, pause_budget, render, sanitize
 from .core.speech import (
+    CACHE_LIMIT_MB,
     MIN_AUDIO_DURATION,
     SpeechEngine,
     choose_voice,
     list_voices,
 )
 from .core.store import Store
+from .core.textclean import clean_symbols
 from .core.timeline import PAUSE, Timeline
+from .core.voices import describe
 
 PREVIEW_TEXT = (
     "文档本身没有时间轴，所以程序按语速把字数换算成时间。"
     "已经读过的句子会用真实时长替换估算值，剩余时间会越听越准。"
 )
+
+# 缓存键格式或音频容器变了就 +1，升级时会清一次旧缓存。
+CACHE_SCHEMA = 2
 
 
 class _PrefetchSignals(QObject):
@@ -45,7 +51,12 @@ class _Prefetch(QRunnable):
                 self.index, str(path) if path else "", duration, error
             )
         except Exception as exc:
-            self.signals.done.emit(self.index, "", 0.0, str(exc))
+            # 退出时留在线程池里的任务会走到这里：信号对象已随窗口销毁，
+            # emit 本身抛 RuntimeError。任务已经没人要了，静默收场即可。
+            try:
+                self.signals.done.emit(self.index, "", 0.0, str(exc))
+            except RuntimeError:
+                pass
 
 
 class _EstimateSignals(QObject):
@@ -124,10 +135,12 @@ class ReaderController(QObject):
         self.startup_message = ""
         self._preview_player: tuple | None = None
         if self.voice:
-            self.engine = SpeechEngine(self.voice, self.rate)
+            self.engine = self._make_engine(self.voice)
+            self._migrate_cache()
             self._ensure_usable_voice()
             self.sec_per_char = self._calibration()
             self.settings["voice"] = self.voice.identifier
+            self.store.save()
 
         self.audio = QAudioOutput(self)
         self.audio.setVolume(max(0.0, min(1.0, self.settings.get("volume", 80) / 100)))
@@ -144,6 +157,7 @@ class ReaderController(QObject):
         self.estimate_signals.done.connect(self.listChanged)
         self.estimate_signals.failed.connect(self.message)
         self._inflight: set[int] = set()
+        self._pending_load: tuple[int, bool] | None = None
 
         self.doc: Document | None = None
         self.timeline: Timeline | None = None
@@ -157,6 +171,28 @@ class ReaderController(QObject):
         self.timer.start(150)
 
     # ---------------------------------------------------------------- setup
+    def _make_engine(self, voice) -> SpeechEngine:
+        """建引擎的统一入口：缓存上限从设置里读，各处新建都走同一份。"""
+        return SpeechEngine(
+            voice,
+            self.rate,
+            cache_limit_mb=int(self.settings.get("cache_limit_mb", CACHE_LIMIT_MB)),
+        )
+
+    def _migrate_cache(self) -> None:
+        """v1.4 换了缓存键格式与音频容器，旧文件永远不会再被命中。
+
+        不清的话，升级后硬盘上会留下一堆几十 MB 的死音频。做一次性清理，
+        用版本号守住，别每次启动都删。
+        """
+        if int(self.settings.get("cache_schema", 0)) >= CACHE_SCHEMA:
+            return
+        removed = self.engine.clear_cache() if self.engine else 0
+        self.settings["cache_schema"] = CACHE_SCHEMA
+        self.store.save()
+        if removed:
+            self.startup_message = f"已清理 {removed} 个旧版音频缓存，音色换成婷婷"
+
     def _ensure_usable_voice(self) -> bool:
         """A listed voice may have no downloaded assets: ``say`` then writes a
         silent 16 ms file with rc=0. Probe once and fall back automatically.
@@ -172,7 +208,8 @@ class ReaderController(QObject):
             if duration >= MIN_AUDIO_DURATION and not error:
                 return switched
             candidates = [
-                v for v in self.voices
+                v
+                for v in self.voices
                 if v.is_chinese and v.identifier not in tried
             ]
             if not candidates:
@@ -182,7 +219,7 @@ class ReaderController(QObject):
             nxt = candidates[0]
             tried.add(nxt.identifier)
             self.voice = nxt
-            self.engine = SpeechEngine(nxt, self.rate)
+            self.engine = self._make_engine(nxt)
             self.settings["voice"] = nxt.identifier
             self.startup_message = f"音色 {failed} 没有声音资源，已切换到 {nxt.identifier}"
             switched = True
@@ -203,6 +240,13 @@ class ReaderController(QObject):
         assert self.doc is not None
         sentence = self.doc.sentences[index]
         raw = sanitize(sentence.text)
+        if self.settings.get("clean_symbols", True):
+            # Symbol noise (paths, bullets, table pipes) is read out loud by
+            # `say`; strip it before any prose rewriting. Empty means the
+            # sentence carried nothing but decoration - keep the original so
+            # the sentence never turns into silence.
+            cleaned = clean_symbols(raw)
+            raw = cleaned or raw
         text = (
             oralize(raw)
             if oralize_enabled(self.doc.path, bool(self.settings.get("oralize", True)))
@@ -317,7 +361,21 @@ class ReaderController(QObject):
         self.sentence_index = index
         self._advancing = False
         text = self._speech_text(index)
-        path, duration, error = self.engine.synthesize(text)
+        cached_path, cached_duration = self.engine.cached(text)
+        if not cached_path:
+            # 合成一句要几十到几百毫秒。在主线程里等会把界面冻住，
+            # 所以先挂起，交给线程池合成，完成后再回来播。
+            if index not in self._inflight:
+                self._inflight.add(index)
+                self.pool.start(
+                    _Prefetch(self.engine, index, text, self.prefetch_signals)
+                )
+            self._pending_load = (index, play)
+            self.message.emit("正在合成这一句…")
+            return
+        # 命中缓存就直接用，不要再走一次 synthesize：它内部还会 cached()
+        # 一遍，等于每句多跑一次 afinfo 子进程。
+        path, duration, error = cached_path, cached_duration, ""
         if not path:
             if error.startswith("EMPTY_AUDIO:") and self._ensure_usable_voice():
                 self.message.emit(self.startup_message)
@@ -359,6 +417,13 @@ class ReaderController(QObject):
         self._inflight.discard(index)
         if self.timeline and duration > 0 and self.doc and index < len(self.doc.sentences):
             self.timeline.set_real(index, duration)
+        pending = self._pending_load
+        if pending and pending[0] == index:
+            self._pending_load = None
+            if error or not path:
+                self.message.emit(f"语音合成失败：{error or '没有音频'}")
+                return
+            self._load_sentence(index, play=pending[1])
 
     def _on_media_status(self, status) -> None:
         if (
@@ -503,7 +568,7 @@ class ReaderController(QObject):
     def _rebuild_for_voice(self) -> None:
         if not self.voice:
             return
-        self.engine = SpeechEngine(self.voice, self.rate)
+        self.engine = self._make_engine(self.voice)
         self.sec_per_char = self._calibration()
         if self.doc:
             index = self.sentence_index
@@ -546,28 +611,67 @@ class ReaderController(QObject):
         self._rebuild_for_voice()
         self.message.emit(f"朗读节奏：{LEVEL_LABELS[self._prosody_level()]}")
 
-    def preview_voice(self) -> None:
-        """Play a short sample on a dedicated player; never disturbs playback."""
-        if not self.engine or not self.voice:
+    def preview_voice(self, identifier: str = "") -> None:
+        """Play a short sample; never disturbs playback.
+
+        ``identifier`` lets the voice browser audition any voice without
+        changing the saved setting first.
+        """
+        voice = self.voice
+        if identifier:
+            voice = next((v for v in self.voices if v.identifier == identifier), None)
+            if voice is None:
+                self.message.emit("这个音色已不在系统里了")
+                return
+        if not voice:
             self.message.emit("本机没有可用的朗读音色")
             return
-        text = oralize(PREVIEW_TEXT) if self.settings.get("oralize", True) else PREVIEW_TEXT
-        rendered = render(
-            text, self._prosody_level(), self.rate, is_para_end=True
-        )
-        path, _, error = self.engine.synthesize(rendered)
-        if not path:
-            self.message.emit(f"试听失败：{error}")
+        engine = self.engine if voice is self.voice else self._make_engine(voice)
+        if engine is None:
+            self.message.emit("本机没有可用的朗读音色")
             return
-        output = QAudioOutput(self)
+        text = PREVIEW_TEXT
+        if self.settings.get("clean_symbols", True):
+            text = clean_symbols(text) or text
+        if self.settings.get("oralize", True):
+            text = oralize(text) or text
+        rendered = render(text, self._prosody_level(), self.rate, is_para_end=True)
+        path, _, error = engine.synthesize(rendered)
+        if not path:
+            if error.startswith("EMPTY_AUDIO:"):
+                self.message.emit(
+                    f"{voice.identifier} 只注册没有下载，按系统设置提示下载后再试"
+                )
+            else:
+                self.message.emit(f"试听失败：{error}")
+            return
+        # Reuse one preview player for the whole session. Allocating a new
+        # QMediaPlayer per audition left the previous one alive as a child of
+        # the controller, so auditioning several voices in a row stacked their
+        # audio on top of each other.
+        if self._preview_player is None:
+            output = QAudioOutput(self)
+            player = QMediaPlayer(self)
+            player.setAudioOutput(output)
+            self._preview_player = (player, output)
+        player, output = self._preview_player
         output.setVolume(self.audio.volume())
-        player = QMediaPlayer(self)
-        player.setAudioOutput(output)
+        player.stop()
+        player.setSource(QUrl())
         player.setSource(QUrl.fromLocalFile(str(path)))
-        self._preview_player = (player, output)  # keep Qt objects alive
         player.play()
+        from .core.voices import describe
+
         self.message.emit(
-            f"正在试听 {self.voice.identifier} · {LEVEL_LABELS[self._prosody_level()]}"
+            f"正在试听 {describe(voice)} · {LEVEL_LABELS[self._prosody_level()]}"
+        )
+
+    def set_symbol_cleaning(self, enabled: bool) -> None:
+        self.settings["clean_symbols"] = bool(enabled)
+        self.store.save()
+        self._rebuild_for_voice()
+        self.message.emit(
+            "已跳过斜杠、破折号这类符号" if enabled else "符号按原样送去朗读"
         )
 
     def set_mode(self, mode: str) -> None:
@@ -607,10 +711,18 @@ class ReaderController(QObject):
 
     def shutdown(self) -> None:
         self.timer.stop()
+        if self._preview_player:
+            try:
+                self._preview_player[0].stop()
+            except RuntimeError:
+                pass
+            self._preview_player = None
         self.player.stop()
         self.playing = False
         self.save_session()
-        self.pool.waitForDone(1000)
+        # 合成一句要 0.9 s 上下（say 占大头），队列里通常还有两三句。等 1 秒
+        # 会让剩下的任务在窗口销毁后继续跑，既写缓存又对着死信号 emit。
+        self.pool.waitForDone(6000)
 
     @staticmethod
     def _fmt(seconds: float) -> str:

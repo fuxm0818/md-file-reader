@@ -52,3 +52,19 @@
 **预期结果**: ✅ 全部构建产物与本地状态被排除；✅ 源码、用例文档、样例与流水线文件保留；✅ 仓库内无 `state.json` / `*.aiff`。
 **通过/失败**: 任一忽略规则缺失为失败。
 **潜在缺陷**: 182 MB 的 `.app` 或 `.venv` 被提交导致 push 失败。
+
+### TC-PKG-007: 应用图标存在并接入打包脚本
+**优先级**: P2　**类型**: 静态契约　**预估**: 1 min
+**前置条件**: `assets/` 与 `build.sh` 存在。
+**测试步骤**: 1. 检查 `assets/AppIcon.icns` 与 `AppIcon.png` 存在且体积合理；2. 检查 `build.sh` 含 `--icon` 与 `AppIcon.icns`；3. 调用 `src.main.app_icon_path()`。
+**预期结果**: ✅ icns > 20 KB（说明多尺寸已写入）；✅ png > 5 KB；✅ 打包命令带图标参数；✅ 源码模式下返回指向 png 的路径。
+**通过/失败**: 缺图标文件或打包未引用为失败。
+**潜在缺陷**: PyInstaller 不传 `--icon` 时产物在 Dock 里显示为空白文档图标。
+
+### TC-PKG-008: 版本号单一来源并写入打包产物
+**优先级**: P1　**类型**: 静态契约　**预估**: 1 min
+**前置条件**: `src/version.py`、`build.sh`、已构建的 `.app`。
+**测试步骤**: 1. 读取 `src.version.__version__`；2. 检查 `build.sh` 在签名前用 PlistBuddy 写入 `CFBundleShortVersionString` / `CFBundleVersion`；3. 检查 `src/main.py` 设置了 `QApplication.setApplicationVersion`；4. 若产物存在，读取其 Info.plist 与源码版本比对。
+**预期结果**: ✅ 版本形如 `1.4.0`；✅ 打包脚本写入两个版本键且改 plist 后重新签名；✅ 界面「关于」显示版本；✅ 产物 Info.plist 与 `src/version.py` 一致，不是 `0.0.0`。
+**通过/失败**: 产物版本为 `0.0.0` 或与源码不一致为失败。
+**潜在缺陷**: 版本号散落在脚本与报告里，用户查不到自己装的是哪一版。

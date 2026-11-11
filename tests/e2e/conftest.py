@@ -60,6 +60,7 @@ CASE_CATALOG = {
     "TC-CORE-018": ("Core", "P0", "断点写入、读取与文档变更失效", 2),
     "TC-CORE-019": ("Core", "P1", "状态文件原子保存与损坏回退", 1),
     "TC-CORE-020": ("Core", "P2", "音频缓存清理与体积统计", 1),
+    "TC-CORE-021": ("Core", "P1", "音频缓存超上限按最旧淘汰", 2),
     "TC-GUI-001": ("GUI", "P0", "打开文档并开始朗读", 3),
     "TC-GUI-002": ("GUI", "P0", "暂停与继续不跳句", 2),
     "TC-GUI-003": ("GUI", "P0", "拖动进度吸附到句子边界", 2),
@@ -74,6 +75,10 @@ CASE_CATALOG = {
     "TC-GUI-012": ("GUI", "P1", "后台估算标记不可用文档与估算时长", 2),
     "TC-GUI-013": ("GUI", "P2", "主窗口三栏组件与信号装配", 2),
     "TC-GUI-014": ("GUI", "P2", "停止与关闭不残留后台线程", 1),
+    "TC-GUI-015": ("GUI", "P1", "文件夹扫描按自然序排列文件名", 1),
+    "TC-GUI-016": ("GUI", "P2", "左右分栏宽度可拖且重开恢复", 1),
+    "TC-GUI-017": ("GUI", "P2", "窄窗口收起语速与音量", 1),
+    "TC-GUI-018": ("GUI", "P1", "系统深浅色切换时界面实时跟随", 2),
     "TC-SEC-001": ("Security", "P0", "命令注入：恶意文档文本不得进入 shell", 2),
     "TC-SEC-002": ("Security", "P0", "路径遍历：缓存键不可控文件名", 1),
     "TC-SEC-003": ("Security", "P1", "动态库注入面：清理 DYLD / PYTHON 环境变量", 1),
@@ -92,6 +97,8 @@ CASE_CATALOG = {
     "TC-PKG-004": ("Packaging", "P1", "无中文音色时自检应降级而非失败", 1),
     "TC-PKG-005": ("Packaging", "P1", "GitHub Actions 工作流契约", 1),
     "TC-PKG-006": ("Packaging", "P2", "仓库不携带大文件与本地状态", 1),
+    "TC-PKG-007": ("Packaging", "P2", "应用图标存在并接入打包脚本", 1),
+    "TC-PKG-008": ("Packaging", "P1", "版本号单一来源并写入打包产物", 1),
     "TC-NAT-001": ("Natural", "P0", "口播化改写：拆句 / 换词 / 符号", 1),
     "TC-NAT-002": ("Natural", "P1", "因果句改为先结论后原因且语义等价", 1),
     "TC-NAT-003": ("Natural", "P0", "改写不破坏正文坐标与高亮映射", 1),
@@ -104,6 +111,17 @@ CASE_CATALOG = {
     "TC-NAT-010": ("Natural", "P1", "缓存键随改写/节奏/音色/语速隔离", 1),
     "TC-NAT-011": ("Natural", "P1", "自然度设置生效并持久化", 1),
     "TC-NAT-012": ("Natural", "P1", "试听不打断当前播放", 1),
+    "TC-VOI-001": ("Voice", "P0", "音色标识翻译为可读档案", 1),
+    "TC-VOI-002": ("Voice", "P1", "音色排序：大陆现代音色优先", 1),
+    "TC-VOI-003": ("Voice", "P0", "悬空音色 ID 回落到默认婷婷", 1),
+    "TC-VOI-004": ("Voice", "P1", "音色库模块与入口已移除", 1),
+    "TC-VOI-005": ("Voice", "P1", "试听任意音色不改变默认设置", 2),
+    "TC-VOI-006": ("Voice", "P0", "符号清理：念得出来的装饰符号被移除", 2),
+    "TC-VOI-007": ("Voice", "P1", "清理不改变正文显示与句子坐标", 1),
+    "TC-VOI-008": ("Voice", "P1", "符号清理开关生效并持久化", 1),
+    "TC-VOI-009": ("Voice", "P1", "状态栏显示当前音色", 1),
+    "TC-VOI-010": ("Voice", "P0", "系统语音输出经打磨为 wav 且响度达标", 1),
+    "TC-VOI-011": ("Voice", "P1", "升级时清理一次旧版音频缓存", 2),
 }
 
 _NODE_CASE: dict[str, str] = {}
@@ -128,7 +146,7 @@ def pytest_configure(config):
 def _reset_tracking_csv():
     TRACKING_CSV.parent.mkdir(parents=True, exist_ok=True)
     with open(TRACKING_CSV, "w", newline="", encoding="utf-8-sig") as f:
-        csv.writer(f).writerow(CSV_HEADERS)
+        csv.writer(f, lineterminator="\n").writerow(CSV_HEADERS)
 
 
 def pytest_collection_modifyitems(items):
@@ -164,7 +182,9 @@ def _append_result(report):
         result = {"passed": "✅ PASSED", "failed": "❌ FAILED", "skipped": "⚠️ SKIPPED"}[outcome]
     note = "自动执行，断言全部通过" if outcome == "passed" else str(report.longrepr)[:300].replace("\n", " ")
     with open(TRACKING_CSV, "a", newline="", encoding="utf-8") as f:
-        csv.writer(f).writerow([
+        # 换行统一成 LF：.gitattributes 声明了 eol=lf，若这里写 CRLF，每次跑完
+        # QA 追踪表都会在 git 里显示成一整篇改动，掩盖真正的用例状态变化。
+        csv.writer(f, lineterminator="\n").writerow([
             case_id, category, priority, name, minutes,
             "offscreen Qt + 隔离 state.json", status, result, "",
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -228,10 +248,17 @@ def sample_audio(voice, tts_text):
 
 @pytest.fixture
 def fresh_store():
+    from src.controller import CACHE_SCHEMA
     from src.core.store import Store
+
     if QA_STATE.exists():
         os.remove(QA_STATE)
-    return Store()
+    store = Store()
+    # 标记缓存已是当前版本，普通用例不会触发升级清理——那个动作会把
+    # 各用例共享的 sample_audio 一起删掉。清理逻辑由 TC-VOI-011 专门验证。
+    store.settings["cache_schema"] = CACHE_SCHEMA
+    store.save()
+    return store
 
 
 @pytest.fixture
@@ -252,7 +279,10 @@ def make_controller(qapp, sample_audio, monkeypatch):
     )
     audio = sample_audio
     monkeypatch.setattr(SpeechEngine, "calibrate", lambda self: 0.2)
-    monkeypatch.setattr(SpeechEngine, "cached", lambda self, text: audio)
+    # 合成接口多了尾部静音参数，桩函数要跟着放宽签名
+    monkeypatch.setattr(
+        SpeechEngine, "cached", lambda self, text, tail_pause=0.0: audio
+    )
     created = []
 
     def factory(store, paths=None):

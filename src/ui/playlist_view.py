@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import os
+import re
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -12,12 +12,35 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMenu,
+    QPushButton,
     QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from ..core.parsers import SUPPORTED_EXTS
+from . import theme
+
+
+_NUMBER = re.compile(r"(\d+)")
+
+
+def natural_key(value: str) -> tuple:
+    """让 ``11.md`` 排在 ``2.md`` 后面，而不是前面。
+
+    ``sorted()`` 比的是字符串，所以文件夹里出现 ``1、11、2、21、3`` 这种
+    顺序。做法是把路径按连续数字切成若干段，数字段转成 int 再逐段比较。
+    每段带一个类型标记：数字段记 0、文本段记 1，这样数字整体排在文字前
+    （与 Finder 一致），也避免 ``int`` 和 ``str`` 相比时抛 TypeError。
+
+    比较的粒度是整个路径，但由于同一批文件的前缀相同，实际效果等价于
+    逐级目录、再逐级文件名地自然排序。
+    """
+    return tuple(
+        (0, int(part)) if part.isdigit() else (1, part.casefold())
+        for part in _NUMBER.split(value)
+        if part
+    )
 
 
 def collect_paths(paths: list[str]) -> list[str]:
@@ -26,13 +49,16 @@ def collect_paths(paths: list[str]) -> list[str]:
         path = Path(raw)
         if path.is_dir():
             try:
-                for child in sorted(path.rglob("*")):
+                for child in path.rglob("*"):
                     if child.is_file() and child.suffix.lower() in SUPPORTED_EXTS:
                         result.append(str(child.resolve()))
             except OSError:
                 continue
         elif path.is_file() and path.suffix.lower() in SUPPORTED_EXTS:
             result.append(str(path.resolve()))
+    # 统一在收齐之后再排：多选十几个文件时，对话框给的顺序是点击顺序，
+    # 用户看到列表里却是乱的。按自然序排一次，目录扫描和批量拖入都受益。
+    result.sort(key=natural_key)
     seen: set[str] = set()
     unique: list[str] = []
     for path in result:
@@ -53,12 +79,22 @@ class _DropList(QListWidget):
     def __init__(self, owner):
         super().__init__()
         self.owner = owner
+        self.setObjectName("PlaylistList")
         self.setDragDropMode(QListWidget.DragDropMode.InternalMove)
         self.setDefaultDropAction(Qt.DropAction.MoveAction)
         self.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         self.setAcceptDrops(True)
         self.setDragEnabled(True)
         self.setAlternatingRowColors(False)
+        self.setUniformItemSizes(True)
+        self.setFrameShape(QListWidget.Shape.NoFrame)
+        self.setWordWrap(False)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # The viewport paints QPalette.Base over the stylesheet background; pick
+        # the sidebar colour as the base so the column reads as one surface.
+        palette = self.palette()
+        palette.setColor(QPalette.ColorRole.Base, theme.qcolor(self.owner.p.sidebar))
+        self.setPalette(palette)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls() or event.source() is self:
@@ -86,6 +122,8 @@ class _DropList(QListWidget):
 
 
 class PlaylistView(QWidget):
+    """Left column: playlist switcher, the document list, and add actions."""
+
     filesDropped = Signal(list, int)
     itemActivated = Signal(int)
     playHere = Signal(int)
@@ -103,32 +141,45 @@ class PlaylistView(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.p = theme.palette()
+        self.setObjectName("Sidebar")
+        # A plain QWidget ignores a stylesheet background unless it is told to
+        # paint it, which is why the sidebar first rendered in the window colour.
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._current_index = -1
         self._items: list[dict] = []
         self._updating = False
 
-        header = QLabel("播放列表")
-        header.setStyleSheet("font-weight: 500; padding: 2px 0;")
+        title = QLabel("播放列表")
+        title.setObjectName("SectionTitle")
+        self.count_label = QLabel("0 个文档")
+        self.count_label.setObjectName("Faint")
+
+        header = QHBoxLayout()
+        header.setContentsMargins(2, 0, 2, 0)
+        header.addWidget(title)
+        header.addStretch(1)
+        header.addWidget(self.count_label)
+
         self.combo = QComboBox()
         self.combo.setMinimumWidth(120)
         self.combo.currentIndexChanged.connect(self._on_combo)
 
+        more = QToolButton()
+        more.setText("⋯")
+        more.setToolTip("新建 / 重命名 / 删除列表")
+        more.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        menu = QMenu(more)
+        menu.addAction("新建列表…", self._new_playlist)
+        menu.addAction("重命名列表…", self._rename_playlist)
+        menu.addAction("删除当前列表", self._delete_playlist)
+        more.setMenu(menu)
+
         bar = QHBoxLayout()
-        bar.setContentsMargins(0, 0, 0, 0)
-        bar.setSpacing(4)
+        bar.setContentsMargins(2, 0, 2, 0)
+        bar.setSpacing(6)
         bar.addWidget(self.combo, 1)
-        for text, tip, slot in (
-            ("+", "新建播放列表", self._new_playlist),
-            ("✎", "重命名当前列表", self._rename_playlist),
-            ("−", "删除当前列表", self._delete_playlist),
-        ):
-            button = QToolButton()
-            button.setText(text)
-            button.setToolTip(tip)
-            button.clicked.connect(lambda _=False, s=slot: s())
-            bar.addWidget(button)
-        bar_widget = QWidget()
-        bar_widget.setLayout(bar)
+        bar.addWidget(more)
 
         self.list = _DropList(self)
         self.list.itemDoubleClicked.connect(
@@ -137,39 +188,63 @@ class PlaylistView(QWidget):
         self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.list.customContextMenuRequested.connect(self._show_menu)
 
-        actions = QHBoxLayout()
-        actions.setContentsMargins(0, 0, 0, 0)
-        actions.setSpacing(4)
-        for text, tip, slot in (
-            ("添加文件", "从任意目录选择文件", self.addFilesRequested),
-            ("添加文件夹", "批量导入整个文件夹", self.addFolderRequested),
-            ("清空", "清空当前列表", self.clearRequested),
-        ):
-            button = QToolButton()
-            button.setText(text)
-            button.setToolTip(tip)
-            button.clicked.connect(lambda _=False, s=slot: s.emit())
-            actions.addWidget(button)
-        actions.addStretch(1)
-        actions_widget = QWidget()
-        actions_widget.setLayout(actions)
+        add = QPushButton("添加文档")
+        add.setObjectName("Primary")
+        add.setCursor(Qt.CursorShape.PointingHandCursor)
+        add.clicked.connect(lambda _=False: self.addFilesRequested.emit())
 
-        hint = QLabel("拖入文件或文件夹 · 拖动条目调整顺序")
-        hint.setStyleSheet("color: gray; font-size: 11px;")
+        folder = QPushButton()
+        folder.setObjectName("IconButton")
+        theme.set_icon(folder, "folder", self.p.secondary, 17)
+        folder.setToolTip("添加整个文件夹")
+        folder.setCursor(Qt.CursorShape.PointingHandCursor)
+        folder.clicked.connect(lambda _=False: self.addFolderRequested.emit())
+        self.folder_button = folder
+
+        clear = QPushButton()
+        clear.setObjectName("IconButton")
+        theme.set_icon(clear, "document", self.p.tertiary, 17)
+        clear.setToolTip("清空当前列表（不删除文件）")
+        clear.setCursor(Qt.CursorShape.PointingHandCursor)
+        clear.clicked.connect(lambda _=False: self.clearRequested.emit())
+        self.clear_button = clear
+
+        actions = QHBoxLayout()
+        actions.setContentsMargins(2, 0, 2, 0)
+        actions.setSpacing(6)
+        actions.addWidget(add, 1)
+        actions.addWidget(folder)
+        actions.addWidget(clear)
+
+        hint = QLabel("拖入文件 · 拖动条目调整顺序")
+        hint.setObjectName("Faint")
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(7)
-        layout.addWidget(header)
-        layout.addWidget(bar_widget)
+        layout.setContentsMargins(14, 14, 14, 12)
+        layout.setSpacing(9)
+        layout.addLayout(header)
+        layout.addLayout(bar)
         layout.addWidget(self.list, 1)
-        layout.addWidget(actions_widget)
+        layout.addLayout(actions)
         layout.addWidget(hint)
 
     # ------------------------------------------------------------- playlist
+    def apply_palette(self, p) -> None:
+        """主题切换时重设图标与条目前景色。
+
+        条目前景色是逐个写进 ``QListWidgetItem`` 的（不能靠样式表级联），
+        换主题只能按当前数据重建一遍。
+        """
+        self.p = p
+        theme.set_icon(self.folder_button, "folder", p.secondary, 17)
+        theme.set_icon(self.clear_button, "document", p.tertiary, 17)
+        self._rebuild()
+        self.update()
+
     def refresh(self, items: list[dict], current_index: int, playlists: list[dict], active_id: str) -> None:
         self._items = items
         self._current_index = current_index
+        self.count_label.setText(f"{len(items)} 个文档")
         self._updating = True
         self.combo.blockSignals(True)
         self.combo.clear()
@@ -189,19 +264,27 @@ class PlaylistView(QWidget):
             name = Path(item["path"]).name
             status = item.get("status", "pending")
             seconds = item.get("est_seconds", 0)
-            suffix = f"   {fmt_duration(seconds)}" if seconds else ""
+            suffix = f" · {fmt_duration(seconds)}" if seconds else ""
             if status == "error":
-                suffix += "   [不可读]"
-            marker = "▶ " if index == self._current_index else "   "
-            entry = QListWidgetItem(f"{marker}{index + 1:02d}  {name}{suffix}")
+                suffix += " · 不可读"
+            current = index == self._current_index
+            entry = QListWidgetItem(f"{index + 1:02d}   {name}{suffix}")
             entry.setData(Qt.ItemDataRole.UserRole, item["path"])
-            entry.setToolTip(item["path"] + (("\n" + item["error"]) if item.get("error") else ""))
-            if index == self._current_index:
-                entry.setBackground(QColor(80, 120, 175, 90))
+            entry.setToolTip(
+                item["path"] + (("\n" + item["error"]) if item.get("error") else "")
+            )
+            entry.setSizeHint(QSize(0, 38))
+            if current:
+                entry.setForeground(QColor(self.p.text))
+                font = entry.font()
+                font.setBold(True)
+                entry.setFont(font)
             elif status == "done":
-                entry.setForeground(QColor(128, 128, 128))
+                entry.setForeground(QColor(self.p.tertiary))
             elif status == "error":
-                entry.setForeground(QColor(210, 90, 90))
+                entry.setForeground(QColor(self.p.danger))
+            else:
+                entry.setForeground(QColor(self.p.secondary))
             self.list.addItem(entry)
         self.list.verticalScrollBar().setValue(scroll)
 
