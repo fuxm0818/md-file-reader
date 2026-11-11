@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from ..core.prosody import LEVEL_LABELS
 from ..core.speech import SpeechEngine
 
 
@@ -23,6 +24,9 @@ class SettingsDialog(QDialog):
     skipCodeChanged = Signal(bool)
     autoResumeChanged = Signal(bool)
     clearCacheRequested = Signal()
+    previewRequested = Signal()
+    oralizeChanged = Signal(bool)
+    prosodyChanged = Signal(int)
 
     def __init__(self, controller, parent=None):
         super().__init__(parent)
@@ -34,8 +38,10 @@ class SettingsDialog(QDialog):
         self.voice_combo = QComboBox()
         chinese = [v for v in controller.voices if v.is_chinese]
         others = [v for v in controller.voices if not v.is_chinese]
+        chinese.sort(key=lambda v: (0 if v.is_modern else 1, v.identifier))
         for voice in chinese:
-            self.voice_combo.addItem(voice.label, voice.identifier)
+            label = voice.label + ("  · 新音色" if voice.is_modern else "")
+            self.voice_combo.addItem(label, voice.identifier)
         if chinese and others:
             self.voice_combo.insertSeparator(len(chinese))
         for voice in others:
@@ -44,6 +50,16 @@ class SettingsDialog(QDialog):
         if current >= 0:
             self.voice_combo.setCurrentIndex(current)
         self.voice_combo.currentIndexChanged.connect(self._on_voice)
+
+        self.preview_button = QPushButton("试听")
+        self.preview_button.setToolTip("用当前音色与节奏读一小段，不打断正在播放的文档")
+        self.preview_button.clicked.connect(
+            lambda _=False: self.previewRequested.emit()
+        )
+        voice_row = QHBoxLayout()
+        voice_row.setSpacing(6)
+        voice_row.addWidget(self.voice_combo, 1)
+        voice_row.addWidget(self.preview_button)
 
         self.rate_combo = QComboBox()
         for rate in range(80, 351, 20):
@@ -75,6 +91,21 @@ class SettingsDialog(QDialog):
         self.auto_resume.setChecked(bool(settings.get("auto_resume", True)))
         self.auto_resume.toggled.connect(self.autoResumeChanged.emit)
 
+        self.oralize = QCheckBox("把书面长句改写成口语短句（技术/合同类自动关闭）")
+        self.oralize.setChecked(bool(settings.get("oralize", True)))
+        self.oralize.toggled.connect(self.oralizeChanged.emit)
+
+        self.prosody_combo = QComboBox()
+        for level in (0, 1, 2, 3):
+            self.prosody_combo.addItem(LEVEL_LABELS[level], level)
+        prosody_index = self.prosody_combo.findData(
+            max(0, min(3, int(settings.get("prosody_level", 2))))
+        )
+        self.prosody_combo.setCurrentIndex(max(0, prosody_index))
+        self.prosody_combo.currentIndexChanged.connect(
+            lambda i: self.prosodyChanged.emit(self.prosody_combo.itemData(i))
+        )
+
         self.cache_label = QLabel()
         self._update_cache_label()
         clear_button = QPushButton("清理缓存音频")
@@ -85,9 +116,11 @@ class SettingsDialog(QDialog):
 
         form = QFormLayout()
         form.setSpacing(10)
-        form.addRow("朗读音色", self.voice_combo)
+        form.addRow("朗读音色", voice_row)
         form.addRow("语速", self.rate_combo)
         form.addRow("音量", self.volume_combo)
+        form.addRow("口语优化", self.oralize)
+        form.addRow("朗读节奏", self.prosody_combo)
         form.addRow("阅读", self.auto_scroll)
         form.addRow("内容", self.skip_code)
         form.addRow("断点", self.auto_resume)
@@ -103,8 +136,9 @@ class SettingsDialog(QDialog):
             )
         else:
             self.warning.setText(
-                f"检测到 {len(chinese)} 个中文音色。切换音色或语速时会自动重新标定语速，"
-                "进度条时长随之校准。"
+                f"检测到 {len(chinese)} 个中文音色，现代音色已排在前面。"
+                "「口语优化」只改写送给语音合成的文本副本，正文显示与句子高亮不变；"
+                "停顿会让总时长略长。切换音色或语速时会自动重新标定语速。"
             )
 
         close_button = QPushButton("关闭")
@@ -139,4 +173,13 @@ class SettingsDialog(QDialog):
             if index >= 0:
                 combo.setCurrentIndex(index)
             combo.blockSignals(False)
+        self.oralize.blockSignals(True)
+        self.oralize.setChecked(bool(settings.get("oralize", True)))
+        self.oralize.blockSignals(False)
+        self.prosody_combo.blockSignals(True)
+        level = max(0, min(3, int(settings.get("prosody_level", 2))))
+        index = self.prosody_combo.findData(level)
+        if index >= 0:
+            self.prosody_combo.setCurrentIndex(index)
+        self.prosody_combo.blockSignals(False)
         self._update_cache_label()

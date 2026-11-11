@@ -32,6 +32,8 @@ done
   --hidden-import PySide6.QtMultimedia \
   --hidden-import pymupdf \
   --hidden-import docx \
+  --hidden-import src.core.oralizer \
+  --hidden-import src.core.prosody \
   "$ROOT/src/main.py"
 
 APP="$ROOT/dist/文档朗读器.app"

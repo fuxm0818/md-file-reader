@@ -23,6 +23,18 @@ CALIBRATION_TEXT = (
 
 DEFAULT_SEC_PER_CHAR = 0.196
 
+# A voice that is listed but whose assets were never downloaded makes `say`
+# silently write a ~16 ms empty file (rc=0, no stderr). Reject it explicitly.
+MIN_AUDIO_DURATION = 0.2
+
+# Apple's newer Chinese voices (macOS 15+) are noticeably less robotic than
+# the legacy Tingting/Meijia/Sinji set. Their identifiers carry a locale
+# suffix, e.g. "Sandy (中文（中国大陆）)".
+MODERN_CHINESE = (
+    "Sandy", "Eddy", "Shelley", "Reed", "Rocko", "Flo", "Grandma", "Grandpa",
+)
+LEGACY_CHINESE = ("Tingting", "Ting-Ting", "Meijia", "Sinji")
+
 
 @dataclass(frozen=True)
 class Voice:
@@ -33,6 +45,12 @@ class Voice:
     @property
     def is_chinese(self) -> bool:
         return self.locale.lower().startswith("zh")
+
+    @property
+    def is_modern(self) -> bool:
+        return any(
+            self.identifier.startswith(name + " (") for name in MODERN_CHINESE
+        )
 
     @property
     def label(self) -> str:
@@ -89,20 +107,27 @@ def list_voices() -> list[Voice]:
     return voices
 
 
+def _name_matches(voice: Voice, name: str) -> bool:
+    return voice.identifier == name or voice.identifier.startswith(name + " (")
+
+
 def choose_voice(voices: list[Voice], preferred: str = "") -> Voice | None:
     if preferred:
         for voice in voices:
-            if voice.identifier == preferred:
+            if voice.identifier == preferred or _name_matches(voice, preferred):
                 return voice
     chinese = [v for v in voices if v.is_chinese]
     if not chinese:
         return None
-    for name in ("Tingting", "Ting-Ting", "Meijia", "Sinji"):
-        for voice in chinese:
-            if voice.identifier.lower() == name.lower():
-                return voice
     mainland = [v for v in chinese if v.locale == "zh_CN"]
-    return mainland[0] if mainland else chinese[0]
+    pool = mainland or chinese
+    # Prefer the modern voices, then fall back to the legacy set.
+    for names in (MODERN_CHINESE, LEGACY_CHINESE):
+        for name in names:
+            for voice in pool:
+                if _name_matches(voice, name):
+                    return voice
+    return pool[0]
 
 
 def probe_duration(path: Path) -> float:
@@ -135,7 +160,9 @@ class SpeechEngine:
     def cached(self, text: str) -> tuple[Path | None, float]:
         path = self.audio_path(text)
         if path.exists() and path.stat().st_size > 100:
-            return path, probe_duration(path)
+            duration = probe_duration(path)
+            if duration >= MIN_AUDIO_DURATION:
+                return path, duration
         return None, 0.0
 
     def synthesize(self, text: str) -> tuple[Path | None, float, str]:
@@ -169,7 +196,16 @@ class SpeechEngine:
             if result.returncode != 0 or not tmp.exists():
                 return None, 0.0, (result.stderr or "语音合成失败").strip()
             os.replace(tmp, final)
-            return final, probe_duration(final), ""
+            duration = probe_duration(final)
+            if duration < MIN_AUDIO_DURATION:
+                # Listed-but-not-downloaded voice: drop the empty file so the
+                # controller can fall back to a usable one.
+                try:
+                    os.remove(final)
+                except OSError:
+                    pass
+                return None, 0.0, f"EMPTY_AUDIO:{self.voice.identifier}"
+            return final, duration, ""
         except (OSError, subprocess.TimeoutExpired) as exc:
             return None, 0.0, str(exc)
 

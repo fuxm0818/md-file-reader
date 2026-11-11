@@ -8,10 +8,22 @@ from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, QUrl, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 
 from .core.models import Document
+from .core.oralizer import oralize, oralize_enabled
 from .core.parsers import parse
-from .core.speech import SpeechEngine, choose_voice, list_voices
+from .core.prosody import LEVEL_LABELS, pause_budget, render, sanitize
+from .core.speech import (
+    MIN_AUDIO_DURATION,
+    SpeechEngine,
+    choose_voice,
+    list_voices,
+)
 from .core.store import Store
-from .core.timeline import Timeline
+from .core.timeline import PAUSE, Timeline
+
+PREVIEW_TEXT = (
+    "文档本身没有时间轴，所以程序按语速把字数换算成时间。"
+    "已经读过的句子会用真实时长替换估算值，剩余时间会越听越准。"
+)
 
 
 class _PrefetchSignals(QObject):
@@ -42,10 +54,11 @@ class _EstimateSignals(QObject):
 
 
 class _Estimate(QRunnable):
-    def __init__(self, store, sec_per_char, signals):
+    def __init__(self, store, sec_per_char, signals, pause: float = PAUSE):
         super().__init__()
         self.store = store
         self.sec_per_char = sec_per_char
+        self.pause = pause
         self.signals = signals
 
     def run(self):
@@ -69,7 +82,7 @@ class _Estimate(QRunnable):
                 doc = parse(path, True)
                 if doc.ok:
                     item["est_seconds"] = round(
-                        sum(s.char_count * self.sec_per_char + 0.18 for s in doc.sentences), 1
+                        sum(s.char_count * self.sec_per_char + self.pause for s in doc.sentences), 1
                     )
                     item["error"] = ""
                     if item.get("status") == "error":
@@ -108,8 +121,11 @@ class ReaderController(QObject):
         self.rate = int(self.settings.get("rate", 200))
         self.engine: SpeechEngine | None = None
         self.sec_per_char = 0.196
+        self.startup_message = ""
+        self._preview_player: tuple | None = None
         if self.voice:
             self.engine = SpeechEngine(self.voice, self.rate)
+            self._ensure_usable_voice()
             self.sec_per_char = self._calibration()
             self.settings["voice"] = self.voice.identifier
 
@@ -141,6 +157,71 @@ class ReaderController(QObject):
         self.timer.start(150)
 
     # ---------------------------------------------------------------- setup
+    def _ensure_usable_voice(self) -> bool:
+        """A listed voice may have no downloaded assets: ``say`` then writes a
+        silent 16 ms file with rc=0. Probe once and fall back automatically.
+
+        Returns True when the voice was actually switched.
+        """
+        if not self.engine or not self.voice:
+            return False
+        tried = {self.voice.identifier}
+        switched = False
+        for _ in range(len(self.voices) + 1):
+            _, duration, error = self.engine.synthesize("语音测试。")
+            if duration >= MIN_AUDIO_DURATION and not error:
+                return switched
+            candidates = [
+                v for v in self.voices
+                if v.is_chinese and v.identifier not in tried
+            ]
+            if not candidates:
+                self.startup_message = "本机中文音色资源不可用，请到系统设置下载中文音色"
+                return switched
+            failed = error.rsplit(":", 1)[-1] or "原音色"
+            nxt = candidates[0]
+            tried.add(nxt.identifier)
+            self.voice = nxt
+            self.engine = SpeechEngine(nxt, self.rate)
+            self.settings["voice"] = nxt.identifier
+            self.startup_message = f"音色 {failed} 没有声音资源，已切换到 {nxt.identifier}"
+            switched = True
+        return switched
+
+    def _prosody_level(self) -> int:
+        return max(0, min(3, int(self.settings.get("prosody_level", 2))))
+
+    def _pause(self) -> float:
+        return PAUSE + pause_budget(self._prosody_level())
+
+    def _speech_text(self, index: int) -> str:
+        """Build the synthesis copy for one sentence.
+
+        The visible document and its sentence spans are never modified; only
+        this copy is rewritten, so highlighting and seek stay in sync.
+        """
+        assert self.doc is not None
+        sentence = self.doc.sentences[index]
+        raw = sanitize(sentence.text)
+        text = (
+            oralize(raw)
+            if oralize_enabled(self.doc.path, bool(self.settings.get("oralize", True)))
+            else raw
+        )
+        sentences = self.doc.sentences
+        para_end = (
+            index + 1 >= len(sentences)
+            or sentences[index + 1].para != sentence.para
+        )
+        para_start = index == 0 or sentences[index - 1].para != sentence.para
+        return render(
+            text,
+            self._prosody_level(),
+            self.rate,
+            is_para_end=para_end,
+            is_para_start=para_start,
+        )
+
     def _calibration(self) -> float:
         assert self.engine and self.voice
         key = f"{self.voice.identifier}|{self.rate}"
@@ -156,7 +237,9 @@ class ReaderController(QObject):
         return self.voice is not None
 
     def estimate_durations(self) -> None:
-        self.pool.start(_Estimate(self.store, self.sec_per_char, self.estimate_signals))
+        self.pool.start(
+            _Estimate(self.store, self.sec_per_char, self.estimate_signals, self._pause())
+        )
 
     # ------------------------------------------------------------- documents
     def select_item(self, index: int, auto_play: bool = True) -> None:
@@ -178,7 +261,7 @@ class ReaderController(QObject):
             return
 
         self.doc = doc
-        self.timeline = Timeline(doc, self.sec_per_char)
+        self.timeline = Timeline(doc, self.sec_per_char, self._pause())
         previous_hash = item.get("doc_hash", "")
         item["doc_hash"] = doc.doc_hash
         item["status"] = "reading"
@@ -220,6 +303,8 @@ class ReaderController(QObject):
         self.select_item(index, auto_play=False)
         self.estimate_durations()
         self.message.emit("已恢复上次位置，点播放继续")
+        if self.startup_message:
+            self.message.emit(self.startup_message)
 
     # -------------------------------------------------------------- playback
     def _load_sentence(self, index: int, play: bool = True) -> None:
@@ -231,9 +316,13 @@ class ReaderController(QObject):
         index = max(0, min(index, len(self.doc.sentences) - 1))
         self.sentence_index = index
         self._advancing = False
-        text = self.doc.sentences[index].text
+        text = self._speech_text(index)
         path, duration, error = self.engine.synthesize(text)
         if not path:
+            if error.startswith("EMPTY_AUDIO:") and self._ensure_usable_voice():
+                self.message.emit(self.startup_message)
+                self._load_sentence(index, play=play)
+                return
             self.message.emit(f"语音合成失败：{error}")
             return
         self.timeline.set_real(index, duration)
@@ -255,7 +344,7 @@ class ReaderController(QObject):
         for index in indices:
             if index < 0 or index >= len(self.doc.sentences) or index in self._inflight:
                 continue
-            text = self.doc.sentences[index].text
+            text = self._speech_text(index)
             cached_path, cached_duration = self.engine.cached(text)
             if cached_path:
                 if self.timeline and cached_duration > 0:
@@ -418,7 +507,7 @@ class ReaderController(QObject):
         self.sec_per_char = self._calibration()
         if self.doc:
             index = self.sentence_index
-            self.timeline = Timeline(self.doc, self.sec_per_char)
+            self.timeline = Timeline(self.doc, self.sec_per_char, self._pause())
             self._inflight.clear()
             self._prefetch(index, index + 1)
             self._load_sentence(index, play=self.playing)
@@ -444,6 +533,42 @@ class ReaderController(QObject):
         self.audio.setVolume(max(0.0, min(1.0, value / 100)))
         self.settings["volume"] = value
         self.store.save()
+
+    def set_oralize(self, enabled: bool) -> None:
+        self.settings["oralize"] = bool(enabled)
+        self.store.save()
+        self._rebuild_for_voice()
+        self.message.emit("口语优化已开启" if enabled else "口语优化已关闭，按原文朗读")
+
+    def set_prosody_level(self, level: int) -> None:
+        self.settings["prosody_level"] = max(0, min(3, int(level)))
+        self.store.save()
+        self._rebuild_for_voice()
+        self.message.emit(f"朗读节奏：{LEVEL_LABELS[self._prosody_level()]}")
+
+    def preview_voice(self) -> None:
+        """Play a short sample on a dedicated player; never disturbs playback."""
+        if not self.engine or not self.voice:
+            self.message.emit("本机没有可用的朗读音色")
+            return
+        text = oralize(PREVIEW_TEXT) if self.settings.get("oralize", True) else PREVIEW_TEXT
+        rendered = render(
+            text, self._prosody_level(), self.rate, is_para_end=True
+        )
+        path, _, error = self.engine.synthesize(rendered)
+        if not path:
+            self.message.emit(f"试听失败：{error}")
+            return
+        output = QAudioOutput(self)
+        output.setVolume(self.audio.volume())
+        player = QMediaPlayer(self)
+        player.setAudioOutput(output)
+        player.setSource(QUrl.fromLocalFile(str(path)))
+        self._preview_player = (player, output)  # keep Qt objects alive
+        player.play()
+        self.message.emit(
+            f"正在试听 {self.voice.identifier} · {LEVEL_LABELS[self._prosody_level()]}"
+        )
 
     def set_mode(self, mode: str) -> None:
         self.settings["mode"] = mode

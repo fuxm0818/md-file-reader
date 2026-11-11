@@ -38,7 +38,7 @@ TRACKING_CSV = CATALOG.TRACKING_CSV
 BUG_CSV = ROOT / "tests/docs/BUG-TRACKING.csv"
 SEC_DOC = ROOT / "tests/docs/03-SEC-TEST-CASES.md"
 COVERAGE_JSON = ROOT / ".qa-workspace/coverage.json"
-VERSION = os.environ.get("QA_VERSION", "v1.0.0")
+VERSION = os.environ.get("QA_VERSION", "v1.1.0")
 
 
 def run_pytest() -> tuple[int, str]:

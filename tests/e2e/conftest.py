@@ -92,6 +92,18 @@ CASE_CATALOG = {
     "TC-PKG-004": ("Packaging", "P1", "无中文音色时自检应降级而非失败", 1),
     "TC-PKG-005": ("Packaging", "P1", "GitHub Actions 工作流契约", 1),
     "TC-PKG-006": ("Packaging", "P2", "仓库不携带大文件与本地状态", 1),
+    "TC-NAT-001": ("Natural", "P0", "口播化改写：拆句 / 换词 / 符号", 1),
+    "TC-NAT-002": ("Natural", "P1", "因果句改为先结论后原因且语义等价", 1),
+    "TC-NAT-003": ("Natural", "P0", "改写不破坏正文坐标与高亮映射", 1),
+    "TC-NAT-004": ("Natural", "P1", "技术类文档自动关闭改写", 1),
+    "TC-NAT-005": ("Natural", "P0", "韵律渲染插入气口，四档强度单调递增", 1),
+    "TC-NAT-006": ("Natural", "P0", "文档正文不得注入 say 嵌入命令", 1),
+    "TC-NAT-007": ("Natural", "P1", "停顿预算与实测停顿一致，时间轴含补偿", 1),
+    "TC-NAT-008": ("Natural", "P1", "默认音色优先现代音色，旧列表回退兼容", 1),
+    "TC-NAT-009": ("Natural", "P1", "空音频判定与自动降级", 2),
+    "TC-NAT-010": ("Natural", "P1", "缓存键随改写/节奏/音色/语速隔离", 1),
+    "TC-NAT-011": ("Natural", "P1", "自然度设置生效并持久化", 1),
+    "TC-NAT-012": ("Natural", "P1", "试听不打断当前播放", 1),
 }
 
 _NODE_CASE: dict[str, str] = {}
@@ -173,9 +185,30 @@ def qapp():
 
 @pytest.fixture(scope="session")
 def voice():
-    from src.core.speech import Voice, choose_voice, list_voices
+    """Pick a voice that can actually synthesize, not merely one that is listed.
+
+    macOS (and CI runners) can list voices whose assets were never downloaded;
+    ``say`` then silently writes a 16 ms empty AIFF. Probing here keeps the
+    whole playback suite runnable on such machines.
+    """
+    from src.core.speech import SpeechEngine, Voice, choose_voice, list_voices
+
     voices = list_voices()
-    return choose_voice(voices) or (voices[0] if voices else Voice("Alex", "en_US"))
+    chosen = choose_voice(voices)
+    preferred = chosen.identifier if chosen else ""
+    candidates = ([chosen] if chosen else []) + [
+        v for v in voices if v.is_chinese and v.identifier != preferred
+    ] + [
+        v for v in voices if not v.is_chinese and v.identifier != preferred
+    ]
+    for candidate in candidates:
+        try:
+            path, duration, _ = SpeechEngine(candidate, 200).synthesize("语音自检。")
+            if path and duration >= 0.2:
+                return candidate
+        except Exception:
+            continue
+    return voices[0] if voices else Voice("Alex", "en_US")
 
 
 @pytest.fixture(scope="session")

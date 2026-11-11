@@ -17,6 +17,8 @@ DEFAULT_SETTINGS = {
     "auto_scroll": True,
     "skip_code": True,
     "auto_resume": True,
+    "oralize": True,           # 文档 → 口播稿（技术类文档自动关闭）
+    "prosody_level": 2,        # 0 关闭 / 1 轻 / 2 标准 / 3 强
     "calibrations": {},
     "cache_limit_mb": 500,
 }

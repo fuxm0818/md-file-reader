@@ -184,6 +184,9 @@ class MainWindow(QMainWindow):
         d.skipCodeChanged.connect(c.set_skip_code)
         d.autoResumeChanged.connect(c.set_auto_resume)
         d.clearCacheRequested.connect(self._clear_cache)
+        d.previewRequested.connect(c.preview_voice)
+        d.oralizeChanged.connect(c.set_oralize)
+        d.prosodyChanged.connect(c.set_prosody_level)
 
         QShortcut(QKeySequence("Space"), self, c.toggle_play)
         QShortcut(QKeySequence("Ctrl+Left"), self, lambda: c.skip_seconds(-15))

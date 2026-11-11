@@ -1,13 +1,13 @@
 {
-  "version": "v1.0.0",
-  "generated_at": "2026-11-11 13:07:04",
+  "version": "v1.1.0",
+  "generated_at": "2026-11-11 15:24:10",
   "pytest_rc": 0,
-  "total": 52,
-  "executed": 52,
-  "passed": 52,
+  "total": 64,
+  "executed": 64,
+  "passed": 64,
   "failed": 0,
   "pass_rate": 100.0,
-  "coverage": 86.2,
+  "coverage": 87.2,
   "security_rate": 100.0,
   "security_detail": "安全用例 12/12 通过，OWASP 类目结论 10/10",
   "bugs": [
@@ -28,7 +28,7 @@
     {
       "name": "G1 测试执行率 100%",
       "ok": true,
-      "value": "52/52"
+      "value": "64/64"
     },
     {
       "name": "G2 通过率 ≥80%",
@@ -48,7 +48,7 @@
     {
       "name": "G5 代码覆盖率 ≥80%",
       "ok": true,
-      "value": "86.2%"
+      "value": "87.2%"
     },
     {
       "name": "G6 安全覆盖 ≥90%",

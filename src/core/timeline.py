@@ -11,12 +11,17 @@ PAUSE = 0.18  # seconds, punctuation breathing room
 class Timeline:
     """Maps a text coordinate (sentence index) onto a virtual time axis."""
 
-    def __init__(self, document: Document, sec_per_char: float):
+    def __init__(
+        self, document: Document, sec_per_char: float, pause: float = PAUSE
+    ):
         self.document = document
         self.sec_per_char = max(0.05, sec_per_char)
+        # ``pause`` includes the prosody layer's breathing pauses so the
+        # estimated axis stays close to the real (afinfo-calibrated) one.
+        self.pause = max(0.0, float(pause))
         count = len(document.sentences)
         self.estimated = [
-            max(MIN_SENTENCE, s.char_count * self.sec_per_char + PAUSE)
+            max(MIN_SENTENCE, s.char_count * self.sec_per_char + self.pause)
             for s in document.sentences
         ]
         self.real: list[float | None] = [None] * count
