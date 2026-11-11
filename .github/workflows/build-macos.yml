@@ -54,14 +54,15 @@ jobs:
       - name: 压缩产物
         run: |
           cd dist
-          zip -q -r -y "文档朗读器.app.zip" "文档朗读器.app"
-          ls -lh "文档朗读器.app.zip"
+          # ASCII asset name: GitHub mangles CJK names into "app.zip".
+          zip -q -r -y "DocReader-${{ github.ref_name }}.zip" "文档朗读器.app"
+          ls -lh "DocReader-${{ github.ref_name }}.zip"
 
       - name: 上传 Artifact
         uses: actions/upload-artifact@v4
         with:
           name: 文档朗读器-macOS-${{ github.ref_name }}
-          path: dist/文档朗读器.app.zip
+          path: dist/DocReader-${{ github.ref_name }}.zip
           retention-days: 90
 
       - name: 上传 QA 报告
@@ -77,7 +78,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: 文档朗读器 ${{ github.ref_name }}
-          files: dist/文档朗读器.app.zip
+          files: dist/DocReader-${{ github.ref_name }}.zip
           generate_release_notes: true
           body: |
             macOS 离线文档朗读器。支持 txt / Markdown / PDF / Word，边看边听、句级高亮、播放列表与断点续读。

@@ -1,6 +1,6 @@
 # QA 报告 · v1.0.0
 
-- 生成时间：2026-11-11 13:00:18
+- 生成时间：2026-11-11 13:04:53
 - 执行方式：`QT_QPA_PLATFORM=offscreen .venv/bin/python tests/run_qa.py`
 - 用例权威来源：`tests/docs/0*-TEST-CASES.md`
 - 状态追踪：`tests/docs/templates/TEST-EXECUTION-TRACKING.csv`
