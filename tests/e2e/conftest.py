@@ -19,6 +19,10 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# Only the full-suite runner (tests/run_qa.py) may write the tracking CSV.
+# Ad-hoc single-test debugging must never wipe the release evidence.
+FULL_RUN = os.environ.get("QA_FULL_RUN") == "1"
+
 QA_DIR = ROOT / ".qa-workspace"
 QA_STATE = QA_DIR / "state.json"
 QA_CACHE = QA_DIR / "cache"
@@ -105,7 +109,8 @@ def pytest_configure(config):
     speech_mod.CACHE_DIR = QA_CACHE
     store_mod.APP_DIR = QA_DIR
     store_mod.STATE_FILE = QA_STATE
-    _reset_tracking_csv()
+    if FULL_RUN:
+        _reset_tracking_csv()
 
 
 def _reset_tracking_csv():
@@ -129,6 +134,8 @@ def pytest_runtest_logreport(report):
 
 
 def _append_result(report):
+    if not FULL_RUN:
+        return
     case_id = _NODE_CASE.get(report.nodeid)
     if not case_id:
         return

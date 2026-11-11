@@ -44,6 +44,7 @@ VERSION = os.environ.get("QA_VERSION", "v1.0.0")
 def run_pytest() -> tuple[int, str]:
     env = os.environ.copy()
     env["QT_QPA_PLATFORM"] = "offscreen"
+    env["QA_FULL_RUN"] = "1"  # authoritative tracking-CSV writer
     # A unique in-project basetemp keeps repeated runs independent and avoids
     # the host shim's mkdir(exist_ok=True) failure on shared system temp dirs.
     basetemp = ROOT / ".qa-workspace" / (

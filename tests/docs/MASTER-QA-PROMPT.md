@@ -34,6 +34,8 @@
 QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest tests/e2e -q -k "TC_CORE_015" --no-cov
 ```
 
+单条调试**不会写追踪 CSV**（只有 `tests/run_qa.py` 全量执行带 `QA_FULL_RUN=1` 才是权威写入方），因此调试不会破坏发版证据。发版前必须重跑全量入口重新生成 52 行记录。
+
 ## 查看指标面板（Skill 自带脚本）
 
 ```bash
